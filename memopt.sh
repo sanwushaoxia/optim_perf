@@ -39,6 +39,30 @@ readonly SCRIPT_DIR
 # shellcheck source=optlib.sh
 source "$SCRIPT_DIR/optlib.sh"
 
+# Application family classification: "name:ERE" pairs matched against the full
+# command line, first match wins. Override in ~/.config/perfopt/apps.conf via
+# FAMILY_RULES (see optlib.sh load_config).
+FAMILY_RULES=(
+    'google-chrome:/opt/google/chrome/chrome'
+    'cursor:/usr/share/cursor/cursor'
+    'feishu:/opt/bytedance/feishu/feishu'
+    'bazel-server:A-server\.jar'
+    'jash-jsruntime:^/proc/self/exe'
+)
+load_config
+
+family_classifier() { # emits an awk program string classifying by FAMILY_RULES
+    local prog='function family(args, comm,    f) {'
+    local rule name ere
+    for rule in "${FAMILY_RULES[@]}"; do
+        name=${rule%%:*}
+        ere=${rule#*:}
+        prog+=" if (args ~ /${ere//\//\\/}/) f = \"${name}\"; else"
+    done
+    prog+=' f = comm; return f }'
+    printf '%s' "$prog"
+}
+
 mb() { # kilobytes -> megabytes
     echo $(( $1 / 1024 ))
 }
@@ -102,18 +126,11 @@ print_top() {
     tmpf=$(mktemp)
     # Line format from ps: rss(kb) comm args-with-spaces. Strip rss and comm,
     # family() classifies by binary path in the remaining args blob.
+    local classifier
+    classifier=$(family_classifier)
     ps -eo rss=,comm=,args= --sort=-rss |
     awk '
-        function family(args, comm,    f) {
-            if      (args ~ /\/opt\/google\/chrome\/chrome/)    f = "google-chrome"
-            else if (args ~ /\/usr\/share\/cursor\/cursor/)     f = "cursor"
-            else if (args ~ /\/opt\/bytedance\/feishu\/feishu/) f = "feishu"
-            else if (args ~ /A-server\.jar/)                    f = "bazel-server"
-            else if (args ~ /^\/proc\/self\/exe/)               f = "jash-jsruntime"
-            else                                                f = comm
-            return f
-        }
-        {
+        '"$classifier"' {
             rss = $1; comm = $2
             sub(/^[ ]*[0-9]+[ ]+[^ ]+[ ]+/, "", $0)   # strip rss and comm, keep args
             f = family($0, comm)
@@ -162,20 +179,29 @@ print_swap_consumers() {
 }
 
 print_recommendations() {
-    cat <<'EOF'
-=== Recommendations ===
- 1. Chrome: enable Memory Saver (chrome://settings/performance) and close
-    dormant tabs — each renderer tab holds 370-450 MB.
- 2. Cursor: close unused project windows; renderers hold 380-650 MB each.
- 3. Feishu: its backend accumulates memory over days. Quitting and relaunching
-    reclaims 1.5-2 GB:  ./memopt.sh --restart feishu
- 4. Bazel: idle server JVMs are safe to stop (rebuilt automatically on next
-    build):  ./memopt.sh --stop-bazel   (or add --max_idle_secs=1800 to bazelrc)
- 5. Swap: if swap stays >60% full, consider zram or a larger swapfile (needs
-    root + reboot):  sudo apt install zram-tools   # or fallocate a bigger swapfile
- 6. Restart Chrome (closes all tabs — bookmark/unsaved data may be lost):
-    ./memopt.sh --restart chrome
-EOF
+    # dynamic: only emit the swap-size advice when swap is actually in use
+    read -r _ avail_kb _ _ swap_used_kb <<<"$(mem_fields)"
+    local swap_mb=$(( swap_used_kb / 1024 ))
+    echo "=== Recommendations ==="
+    local n=1
+    if (( swap_mb > 0 )); then
+        echo " $n. Swap is using ${swap_mb} MB. If it stays >60% full, consider zram or a"
+        echo "    larger swapfile (needs root + reboot): sudo apt install zram-tools"
+        (( n += 1 ))
+    fi
+    echo " $n. Bazel: idle server JVMs are safe to stop (rebuilt automatically on next"
+    echo "    build):  ./memopt.sh --stop-bazel   (or add --max_idle_secs=1800 to bazelrc)"
+    (( n += 1 ))
+    echo " $n. Chrome: enable Memory Saver (chrome://settings/performance) and close"
+    echo "    dormant tabs — each renderer tab holds 370-450 MB."
+    (( n += 1 ))
+    echo " $n. Cursor: close unused project windows; renderers hold 380-650 MB each."
+    (( n += 1 ))
+    echo " $n. Feishu: its backend accumulates memory over days. Quitting and relaunching"
+    echo "    reclaims 1.5-2 GB:  ./memopt.sh --restart feishu"
+    (( n += 1 ))
+    echo " $n. Restart Chrome (closes all tabs — bookmark/unsaved data may be lost):"
+    echo "    ./memopt.sh --restart chrome"
     echo
 }
 
@@ -294,6 +320,7 @@ action_trim_swap() {
 }
 
 # app definitions for --restart: <binary-path> <launch-command>
+# Override in ~/.config/perfopt/apps.conf (see optlib.sh load_config).
 APP_CHROME=('/opt/google/chrome/chrome' '/opt/google/chrome/chrome')
 APP_FEISHU=('/opt/bytedance/feishu/feishu' '/opt/bytedance/feishu/feishu')
 APP_CURSOR=('/usr/share/cursor/cursor' '/usr/share/cursor/cursor')

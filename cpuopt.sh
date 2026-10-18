@@ -46,6 +46,30 @@ readonly SCRIPT_DIR
 # shellcheck source=optlib.sh
 source "$SCRIPT_DIR/optlib.sh"
 
+# Application family classification: "name:ERE" pairs matched against the full
+# command line, first match wins. Override in ~/.config/perfopt/apps.conf via
+# FAMILY_RULES (see optlib.sh load_config).
+FAMILY_RULES=(
+    'compilers:cc1plus|cc1|as$|ld\.gold|/bin/ld'
+    'bazel-server:A-server\.jar'
+    'google-chrome:/opt/google/chrome/chrome'
+    'cursor:/usr/share/cursor/cursor'
+    'feishu:/opt/bytedance/feishu/feishu'
+)
+load_config
+
+family_classifier() { # emits an awk program string classifying by FAMILY_RULES
+    local prog='function fam(args, comm,    f) {'
+    local rule name ere
+    for rule in "${FAMILY_RULES[@]}"; do
+        name=${rule%%:*}
+        ere=${rule#*:}
+        prog+=" if (args ~ /${ere//\//\\/}/) f = \"${name}\"; else"
+    done
+    prog+=' f = comm; return f }'
+    printf '%s' "$prog"
+}
+
 # ---------------------------------------------------------------------------
 # reporting
 # ---------------------------------------------------------------------------
@@ -135,6 +159,8 @@ ps_time_to_secs() { # ps_time_to_secs <time-string> -> prints seconds
 print_families() {
     echo "=== CPU by application family (lifetime cumulative) ==="
     printf '%-20s %10s %8s\n' 'FAMILY' 'CPU_HOURS' 'PROCS'
+    local classifier
+    classifier=$(family_classifier)
     ps -eo time=,comm=,args= |
     awk '
         function to_secs(t,    n, d, secs) {
@@ -145,16 +171,7 @@ print_families() {
             else if (n == 2) secs = d[1]*60 + d[2]
             return secs
         }
-        function fam(args, comm,    f) {
-            if      (args ~ /cc1plus|cc1|as$|ld\.gold|\/bin\/ld/) f = "compilers"
-            else if (args ~ /A-server\.jar/)                      f = "bazel-server"
-            else if (args ~ /\/opt\/google\/chrome\/chrome/)      f = "google-chrome"
-            else if (args ~ /\/usr\/share\/cursor\/cursor/)       f = "cursor"
-            else if (args ~ /\/opt\/bytedance\/feishu\/feishu/)   f = "feishu"
-            else                                                  f = comm
-            return f
-        }
-        {
+        '"$classifier"' {
             t = $1; comm = $2
             $1=$2=""; sub(/^ +/, "", $0)
             f = fam($0, comm)
@@ -198,21 +215,39 @@ print_scan() { # print_scan <hours>
 }
 
 print_recommendations() {
-    cat <<'EOF'
-=== Recommendations ===
- 1. Bazel builds saturate all cores. Cap with:  bazel --jobs=8 build ...
-    (or add build --jobs=8 to ~/.apollo.bazelrc) so the desktop stays usable.
- 2. Runaway webviews: check  ./cpuopt.sh --scan 8  — anything burning days of
-    CPU is a stuck renderer (e.g. AweSun's WebKitWebProcess). Restart its parent
-    app, or  ./cpuopt.sh --kill <PID>  if it is confirmed stuck.
- 3. Throttle instead of kill for background things you do not need fast:
-    ./cpuopt.sh --throttle <PID>   (renice +15, fully reversible with --unthrottle)
- 4. AweSun (remote desktop) keeps running even when idle (9h+ CPU over 6 days);
-    exit it from its tray icon when not needed, or stop autorun: it is started
-    with --cmd=autorun.
- 5. Feishu/Cursor/Chrome accumulate background CPU over days; restarting them
-    periodically (or when fans spin up) resets their CPU usage.
-EOF
+    # dynamic: bazel advice only when a bazel server is running, throttle/kill
+    # advice only when runaway candidates exist
+    local bazel_procs runaways
+    bazel_procs=$(pgrep -fc 'A-server\.jar' 2>/dev/null || true)
+    bazel_procs=${bazel_procs:-0}; bazel_procs=${bazel_procs//[!0-9]/}
+    runaways=$(ps -eo time=,args= 2>/dev/null |
+        awk '
+            function to_secs(t,    n, d, secs) {
+                n = split(t, d, /[-:]/)
+                secs = 0
+                if (n == 4) secs = d[1]*86400 + d[2]*3600 + d[3]*60 + d[4]
+                else if (n == 3) secs = d[1]*3600 + d[2]*60 + d[3]
+                else if (n == 2) secs = d[1]*60 + d[2]
+                return secs
+            }
+            { t=$1; $1=""; if (to_secs(t) > '"${SCAN_HOURS}"'*3600) found++ }
+            END { print found+0 }')
+    echo "=== Recommendations ==="
+    local n=1
+    if (( bazel_procs > 0 )); then
+        echo " $n. Bazel builds saturate all cores. Cap with:  bazel --jobs=8 build ..."
+        echo "    (or add build --jobs=8 to ~/.apollo.bazelrc) so the desktop stays usable."
+        (( n += 1 ))
+    fi
+    if (( runaways > 0 )); then
+        echo " $n. Runaway webviews: check  ./cpuopt.sh --scan ${SCAN_HOURS}  — anything burning days"
+        echo "    of CPU is a stuck renderer. Restart its parent app, or"
+        echo "    ./cpuopt.sh --kill <PID>  if it is confirmed stuck; prefer --throttle for"
+        echo "    background things you do not need fast (renice +15, reversible)."
+        (( n += 1 ))
+    fi
+    echo " $n. Feishu/Cursor/Chrome accumulate background CPU over days; restarting them"
+    echo "    periodically (or when fans spin up) resets their CPU usage."
     echo
 }
 

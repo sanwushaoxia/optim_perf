@@ -97,6 +97,19 @@ proc_cpu_jiffies() { # proc_cpu_jiffies <pid> -> prints utime+stime jiffies
 
 proc_pid_alive() { [[ -d /proc/$1 ]] && [[ $(ps -o comm= -p "$1" 2>/dev/null) != "" ]]; }
 
+load_config() {
+    # load_config — source ~/.config/perfopt/apps.conf if present.
+    # The conf can override: APP_CHROME/APP_FEISHU/APP_CURSOR arrays and
+    # FAMILY_RULES (whitespace-separated "name:ERE" pairs, longest match wins).
+    local conf=${XDG_CONFIG_HOME:-$HOME/.config}/perfopt/apps.conf
+    # explicit if/return 0: `[[ -f ]] && source` returning false would trip
+    # the caller's set -e
+    if [[ -f $conf ]]; then
+        source "$conf"
+    fi
+    return 0
+}
+
 parse_common_args() {
     # parse_common_args -- handles: --watch, --top, --threshold, --yes,
     # --dry-run, -h/--help. Sets WATCH_INTERVAL, TOP_N, WATCH_THRESHOLD,
