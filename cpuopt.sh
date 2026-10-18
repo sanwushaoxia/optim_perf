@@ -4,6 +4,7 @@
 # Modes:
 #   (no args)          report + safe auto-tier (flag renice'd pids, report only)
 #   --report           analysis only, zero side effects
+#   --json             with --report: machine-readable JSON output
 #   --scan [HOURS]     list processes with cumulative CPU time > HOURS (default 8)
 #   --throttle PID     renice +15 an always-busy non-interactive process (reversible)
 #   --unthrottle PID   restore nice 0
@@ -40,6 +41,7 @@ SCAN_HOURS=$SCAN_HOURS_DEFAULT
 # shellcheck disable=SC2034  # consumed by optlib.sh confirm()
 ASSUME_YES=0
 DRY_RUN=0
+JSON_OUT=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -212,6 +214,108 @@ print_scan() { # print_scan <hours>
         echo '  (none — no process has burned more than the threshold)'
     fi
     echo
+}
+
+json_escape() { # json_escape <string> — escape for a JSON string literal
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\r'/\\r}
+    printf '%s' "$s"
+}
+
+emit_json_report() { # emit_json_report <top_n> <scan_hours> — machine-readable report
+    local top_n=$1 scan_hours=$2
+    local stats
+    stats=$(cpu_stats)
+    local ncores load1 user_pct idle_pct
+    read -r ncores load1 user_pct idle_pct <<<"$stats"
+    echo '{'
+    printf '  "timestamp": "%s",\n' "$(date -Iseconds)"
+    printf '  "cpu": {"ncores": %d, "load1": %s, "user_pct": %s, "idle_pct": %s},\n' \
+        "$ncores" "$load1" "$user_pct" "$idle_pct"
+
+    # top processes
+    printf '  "top": ['
+    local sep=""
+    while IFS=$'\t' read -r pcpu cput pid comm args; do
+        [[ -n $pid ]] || continue
+        printf '%s\n    {"pid": %s, "cpu_pct": %s, "cpu_time": "%s", "comm": "%s", "args": "%s"}' \
+            "$sep" "$pid" "$pcpu" "$(json_escape "$cput")" "$(json_escape "$comm")" "$(json_escape "${args:0:120}")"
+        sep=","
+    done < <(ps -eo pcpu=,time=,pid=,comm=,args= --sort=-pcpu |
+        awk -v topn="$top_n" 'NR <= topn {
+            pcpu=$1; cput=$2; pid=$3; comm=$4
+            $1=$2=$3=$4=""
+            sub(/^ +/, "", $0)
+            printf "%s\t%s\t%s\t%s\t%s\n", pcpu, cput, pid, comm, $0
+        }')
+    [[ -n $sep ]] && printf '\n  '
+    printf '],\n'
+
+    # families
+    local classifier
+    classifier=$(family_classifier)
+    printf '  "families": ['
+    sep=""
+    while IFS=$'\t' read -r hrs fam cnt; do
+        [[ -n $fam ]] || continue
+        printf '%s\n    {"family": "%s", "cpu_hours": %s, "procs": %s}' \
+            "$sep" "$(json_escape "$fam")" "$hrs" "$cnt"
+        sep=","
+    done < <(ps -eo time=,comm=,args= |
+        awk '
+            function to_secs(t,    n, d, secs) {
+                n = split(t, d, /[-:]/)
+                secs = 0
+                if (n == 4) secs = d[1]*86400 + d[2]*3600 + d[3]*60 + d[4]
+                else if (n == 3) secs = d[1]*3600 + d[2]*60 + d[3]
+                else if (n == 2) secs = d[1]*60 + d[2]
+                return secs
+            }
+            '"$classifier"' {
+                t = $1; comm = $2
+                $1=$2=""; sub(/^ +/, "", $0)
+                f = fam($0, comm)
+                hrs[f] += to_secs(t)/3600.0; cnt[f]++
+            }
+            END {
+                for (f in hrs) printf "%10.2f\t%s\t%d\n", hrs[f], f, cnt[f]
+            }
+        ' | sort -rn | awk 'NR <= 10' | sort -t$'\t' -k2)
+    [[ -n $sep ]] && printf '\n  '
+    printf '],\n'
+
+    # runaway scan
+    printf '  "runaways": ['
+    sep=""
+    while IFS=$'\t' read -r hrs pid pcpu comm args; do
+        [[ -n $pid ]] || continue
+        printf '%s\n    {"pid": %s, "cpu_hours": %s, "cpu_pct": %s, "comm": "%s", "args": "%s"}' \
+            "$sep" "$pid" "$hrs" "$pcpu" "$(json_escape "$comm")" "$(json_escape "${args:0:120}")"
+        sep=","
+    done < <(ps -eo time=,pid=,pcpu=,comm=,args= --sort=-time |
+        awk -v minh="$scan_hours" '
+            function to_secs(t,    n, d, secs) {
+                n = split(t, d, /[-:]/)
+                secs = 0
+                if (n == 4) secs = d[1]*86400 + d[2]*3600 + d[3]*60 + d[4]
+                else if (n == 3) secs = d[1]*3600 + d[2]*60 + d[3]
+                else if (n == 2) secs = d[1]*60 + d[2]
+                return secs
+            }
+            {
+                t=$1; pid=$2; pcpu=$3; comm=$4
+                $1=$2=$3=$4=""; sub(/^ +/, "", $0)
+                secs = to_secs(t)
+                if (secs > minh*3600)
+                    printf "%.1f\t%s\t%.1f\t%s\t%s\n", secs/3600.0, pid, pcpu, comm, $0
+            }')
+    [[ -n $sep ]] && printf '\n  '
+    printf ']\n'
+    echo '}'
 }
 
 print_recommendations() {
@@ -412,9 +516,11 @@ main() {
     while (( ${#rest[@]} )); do
         case ${rest[0]} in
             --report)      mode="report";;
+            --json)        JSON_OUT=1;;
             --scan)        mode="scan"; [[ ${rest[1]:-} =~ ^[0-9]+(\.[0-9]+)?$ ]] && { SCAN_HOURS=${rest[1]}; rest=("${rest[@]:1}"); };;
             --throttle)    mode="throttle"; THROTTLE_PID=${rest[1]:?--throttle needs a PID}; rest=("${rest[@]:1}");;
-            --unthrottle)  mode="unthrottle"; THROTTLE_PID=${rest[1]:?--unthrottle needs a PID}; rest=("${rest[@]:1}");;            --kill)        mode="kill"; KILL_PID="${rest[1]:?--kill needs a PID}"; rest=("${rest[@]:1}");;
+            --unthrottle)  mode="unthrottle"; THROTTLE_PID=${rest[1]:?--unthrottle needs a PID}; rest=("${rest[@]:1}");;
+            --kill)        mode="kill"; KILL_PID="${rest[1]:?--kill needs a PID}"; rest=("${rest[@]:1}");;
             --stop-bazel-thrash) mode="stop-bazel-thrash";;
             --install-timer) mode="install-timer";;
             *) die "unknown option: ${rest[0]} (see --help)";;
@@ -426,7 +532,12 @@ main() {
     echo "$SCRIPT_NAME — $(date '+%F %T')" | tee -a "$LOG_FILE" >/dev/null
 
     case $mode in
-        report)      print_summary; print_top "$TOP_N"; print_families; print_scan "$SCAN_HOURS"; print_recommendations;;
+        report)
+            if [[ ${JSON_OUT:-0} -eq 1 ]]; then
+                emit_json_report "$TOP_N" "$SCAN_HOURS"
+            else
+                print_summary; print_top "$TOP_N"; print_families; print_scan "$SCAN_HOURS"; print_recommendations
+            fi;;
         scan)        print_scan "$SCAN_HOURS";;
         throttle)    action_throttle "$THROTTLE_PID";;
         unthrottle)  action_unthrottle "$THROTTLE_PID";;
