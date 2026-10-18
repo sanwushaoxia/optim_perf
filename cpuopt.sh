@@ -44,7 +44,8 @@ DRY_RUN=0
 # ---------------------------------------------------------------------------
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
@@ -304,8 +305,10 @@ action_stop_bazel_thrash() {
     echo '=== Stop stale bazel build processes ==='
     # The build is considered stale if no bazel client process is driving it.
     local clients compilers
-    clients=$(ps -eo args= | grep -c '[b]azel(apollo)\|[b]azel --' || true)
-    compilers=$(pgrep -u "$USER" -c 'cc1plus|cc1$' 2>/dev/null || echo 0)
+    clients=$(pgrep -fc 'bazel\(apollo\)|bazel --' 2>/dev/null || true)
+    clients=${clients:-0}; clients=${clients//[!0-9]/}
+    compilers=$(pgrep -u "$USER" -c 'cc1plus|cc1$' 2>/dev/null || true)
+    compilers=${compilers:-0}; compilers=${compilers//[!0-9]/}
     echo "  bazel clients: ${clients}, compiler processes: ${compilers}"
     if (( compilers == 0 )); then
         echo '  no compiler processes running — nothing to do.'
@@ -321,6 +324,7 @@ action_stop_bazel_thrash() {
             || { echo '  skipped.'; echo; return 0; }
     fi
     if [[ $DRY_RUN -eq 1 ]]; then
+        # shellcheck disable=SC2016  # dry-run display text, shown verbatim
         echo '[dry-run] pkill -TERM -u "$USER" -f "cc1plus|cc1 "'
     else
         pkill -TERM -u "$USER" -f 'cc1plus|cc1 ' || true
@@ -337,8 +341,6 @@ action_watch() {
         print_summary
         local ncores load1 user_pct idle_pct
         read -r ncores load1 user_pct idle_pct <<<"$(cpu_stats)"
-        local busy
-        busy=$(awk -v p="$user_pct" 'BEGIN{printf "%.0f", 100-p}')
         if (( $(awk -v p="$idle_pct" -v t="$WATCH_THRESHOLD" 'BEGIN{print (p < 100-t)}') )); then
             echo "⚠ ALERT: CPU busy >${WATCH_THRESHOLD}% — top offender:"
             ps -eo pcpu=,comm=,args= --sort=-pcpu | head -3 | awk '{printf "  %5s%%  %s\n", $1, $2}'
@@ -385,14 +387,14 @@ main() {
     local mode=auto
     while (( $# )); do
         case $1 in
-            --report)      mode=report;;
-            --scan)        mode=scan; [[ ${2:-} =~ ^[0-9.]+$ ]] && { SCAN_HOURS=$2; shift; };;
-            --throttle)    mode=throttle; shift; THROTTLE_PID=${1:?--throttle needs a PID};;
-            --unthrottle)  mode=unthrottle; shift; THROTTLE_PID=${1:?--unthrottle needs a PID};;
-            --kill)        mode=kill; shift; KILL_PID=${1:?--kill needs a PID};;
-            --stop-bazel-thrash) mode=stop-bazel-thrash;;
-            --watch)       mode=watch; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
-            --install-timer) mode=install-timer;;
+            --report)      mode="report";;
+            --scan)        mode="scan"; [[ ${2:-} =~ ^[0-9.]+$ ]] && { SCAN_HOURS=$2; shift; };;
+            --throttle)    mode="throttle"; shift; THROTTLE_PID=${1:?--throttle needs a PID};;
+            --unthrottle)  mode="unthrottle"; shift; THROTTLE_PID=${1:?--unthrottle needs a PID};;
+            --kill)        mode="kill"; shift; KILL_PID="${1:?--kill needs a PID}";;
+            --stop-bazel-thrash) mode="stop-bazel-thrash";;
+            --watch)       mode="watch"; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
+            --install-timer) mode="install-timer";;
             --top)         shift; TOP_N=${1:?--top needs a number};;
             --threshold)   shift; WATCH_THRESHOLD=${1:?--threshold needs a percentage};;
             --yes)         ASSUME_YES=1;;

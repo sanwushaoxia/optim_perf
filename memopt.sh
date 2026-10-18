@@ -37,7 +37,8 @@ DRY_RUN=0
 # ---------------------------------------------------------------------------
 
 log() {
-    local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    local msg
+    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
 }
@@ -344,6 +345,7 @@ action_restart_app() {
     fi
 
     if [[ -n $pids ]]; then
+        # shellcheck disable=SC2086  # pids is a whitespace-separated list on purpose
         kill $pids 2>/dev/null || true
         local i=0
         while (( i < 15 )); do
@@ -361,8 +363,7 @@ action_restart_app() {
 
     echo "  launching $app..."
     setsid "$launcher" >/dev/null 2>&1 < /dev/null &
-    disown
-    log "$app relaunched"
+    disown    log "$app relaunched"
     echo '  done.'
     echo
 }
@@ -425,13 +426,13 @@ main() {
     local mode=auto
     while (( $# )); do
         case $1 in
-            --report)      mode=report;;
-            --stop-bazel)  mode=stop-bazel;;
-            --clean)       mode=clean;;
-            --trim-swap)   mode=trim-swap;;
-            --restart)     mode=restart; shift; RESTART_APP=${1:?--restart needs an app: chrome|feishu|cursor};;
-            --watch)       mode=watch; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
-            --install-timer) mode=install-timer;;
+            --report)      mode="report";;
+            --stop-bazel)  mode="stop-bazel";;
+            --clean)       mode="clean";;
+            --trim-swap)   mode="trim-swap";;
+            --restart)     mode="restart"; shift; RESTART_APP=${1:?--restart needs an app: chrome|feishu|cursor};;
+            --watch)       mode="watch"; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
+            --install-timer) mode="install-timer";;
             --top)         shift; TOP_N=${1:?--top needs a number};;
             --threshold)   shift; WATCH_THRESHOLD=${1:?--threshold needs a percentage};;
             --yes)         ASSUME_YES=1;;

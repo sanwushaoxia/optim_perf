@@ -1,0 +1,6 @@
+# runtime artifacts
+*.log
+*.log.1
+
+# local config overrides
+perfopt.conf
