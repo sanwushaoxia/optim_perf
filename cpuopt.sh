@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # cpuopt.sh — CPU usage analysis & tiered optimization for Linux desktops.
-#
+# <<usage
 # Modes:
 #   (no args)          report + safe auto-tier (flag renice'd pids, report only)
 #   --report           analysis only, zero side effects
@@ -21,10 +21,11 @@
 # processes (GNOME shell, terminal, Xorg, ...) are never throttled or killed;
 # SIGTERM first, SIGKILL only after 30s grace and only with explicit consent;
 # everything logged to ~/.local/share/cpuopt.log.
+# usage>>
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="cpuopt.sh"
+SCRIPT_NAME="cpuopt.sh"
 readonly LOG_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/cpuopt.log"
 readonly TOP_N_DEFAULT=15
 readonly WATCH_INTERVAL_DEFAULT=60
@@ -39,37 +40,10 @@ SCAN_HOURS=$SCAN_HOURS_DEFAULT
 ASSUME_YES=0
 DRY_RUN=0
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-log() {
-    local msg
-    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-}
-
-die() { echo "error: $*" >&2; exit 1; }
-
-confirm() {
-    [[ $ASSUME_YES -eq 1 ]] && return 0
-    local reply
-    read -r -p "$1 [y/N] " reply </dev/tty 2>/dev/null || reply=""
-    [[ $reply =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
-run_or_dry() {
-    local desc=$1; shift
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo "[dry-run] $desc:"
-        echo "          \$ $*"
-    else
-        echo "[action]  $desc"
-        log "$desc — running: $*"
-        "$@"
-    fi
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+# shellcheck source=optlib.sh
+source "$SCRIPT_DIR/optlib.sh"
 
 # ---------------------------------------------------------------------------
 # reporting
@@ -126,6 +100,19 @@ print_top() {
 }
 
 # ps time= can be MM:SS, HH:MM:SS or DDD-HH:MM:SS — parse by field count
+ps_time_to_secs() { # ps_time_to_secs <time-string> -> prints seconds
+    awk -v t="$1" '
+        function to_secs(t,    n, d, secs) {
+            n = split(t, d, /[-:]/)
+            secs = 0
+            if (n == 4) secs = d[1]*86400 + d[2]*3600 + d[3]*60 + d[4]
+            else if (n == 3) secs = d[1]*3600 + d[2]*60 + d[3]
+            else if (n == 2) secs = d[1]*60 + d[2]
+            return secs
+        }
+        BEGIN { print to_secs(t) }'
+}
+
 print_families() {
     echo "=== CPU by application family (lifetime cumulative) ==="
     printf '%-20s %10s %8s\n' 'FAMILY' 'CPU_HOURS' 'PROCS'
@@ -350,59 +337,34 @@ action_watch() {
     done
 }
 
-action_install_timer() {
-    echo '=== Installing daily-report systemd user timer ==='
-    local src_dir destination abs_script
-    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/systemd"
-    destination=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-    if [[ ! -f $src_dir/cpuopt-report.timer ]]; then
-        die "systemd units not found next to script (expected $src_dir)"
-    fi
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo "[dry-run] install $src_dir/cpuopt-report.{service,timer} -> $destination"
-        return 0
-    fi
-    mkdir -p "$destination"
-    abs_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cpuopt.sh"
-    sed "s|__CPUOPT_PATH__|$abs_script|" \
-        "$src_dir"/cpuopt-report.service > "$destination"/cpuopt-report.service
-    cp "$src_dir"/cpuopt-report.timer "$destination/"
-    systemctl --user daemon-reload
-    systemctl --user enable --now cpuopt-report.timer
-    log 'installed and enabled cpuopt-report.timer'
-    echo '  installed and enabled. View reports with:'
-    echo '    journalctl --user -u cpuopt-report.service'
-}
+action_install_timer() { install_timer cpuopt; }
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
-usage() {
-    sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'
-    exit 0
-}
+usage() { usage_from_markers; }
 
 main() {
     local mode=auto
-    while (( $# )); do
-        case $1 in
+    parse_common_args "$@"
+    local -a rest=("${REMAINING_ARGS[@]}")
+    case ${MODE:-} in
+        help) usage_from_markers;;
+        watch) mode=watch;;
+    esac
+    while (( ${#rest[@]} )); do
+        case ${rest[0]} in
             --report)      mode="report";;
-            --scan)        mode="scan"; [[ ${2:-} =~ ^[0-9.]+$ ]] && { SCAN_HOURS=$2; shift; };;
-            --throttle)    mode="throttle"; shift; THROTTLE_PID=${1:?--throttle needs a PID};;
-            --unthrottle)  mode="unthrottle"; shift; THROTTLE_PID=${1:?--unthrottle needs a PID};;
-            --kill)        mode="kill"; shift; KILL_PID="${1:?--kill needs a PID}";;
+            --scan)        mode="scan"; [[ ${rest[1]:-} =~ ^[0-9]+(\.[0-9]+)?$ ]] && { SCAN_HOURS=${rest[1]}; rest=("${rest[@]:1}"); };;
+            --throttle)    mode="throttle"; THROTTLE_PID=${rest[1]:?--throttle needs a PID}; rest=("${rest[@]:1}");;
+            --unthrottle)  mode="unthrottle"; THROTTLE_PID=${rest[1]:?--unthrottle needs a PID}; rest=("${rest[@]:1}");;
+            --kill)        mode="kill"; KILL_PID="${rest[1]:?--kill needs a PID}"; rest=("${rest[@]:1}");;
             --stop-bazel-thrash) mode="stop-bazel-thrash";;
-            --watch)       mode="watch"; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
             --install-timer) mode="install-timer";;
-            --top)         shift; TOP_N=${1:?--top needs a number};;
-            --threshold)   shift; WATCH_THRESHOLD=${1:?--threshold needs a percentage};;
-            --yes)         ASSUME_YES=1;;
-            --dry-run)     DRY_RUN=1;;
-            -h|--help)     usage;;
-            *) die "unknown option: $1 (see --help)";;
+            *) die "unknown option: ${rest[0]} (see --help)";;
         esac
-        shift
+        rest=("${rest[@]:1}")
     done
 
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true

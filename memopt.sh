@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # memopt.sh — memory usage analysis & tiered optimization for Linux desktops.
-#
+# <<usage
 # Modes:
 #   (no args)          report + safe auto-tier (stop idle bazel server)
 #   --report           analysis only, zero side effects
@@ -17,10 +17,11 @@
 #
 # Safety invariants: only processes owned by $USER are touched, apps are matched
 # by exact binary path, SIGTERM first, everything logged to ~/.local/share/memopt.log.
+# usage>>
 
 set -euo pipefail
 
-readonly SCRIPT_NAME="memopt.sh"
+SCRIPT_NAME="memopt.sh"
 readonly LOG_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/memopt.log"
 readonly TOP_N_DEFAULT=15
 readonly WATCH_INTERVAL_DEFAULT=60
@@ -32,39 +33,10 @@ WATCH_THRESHOLD=$WATCH_THRESHOLD_DEFAULT
 ASSUME_YES=0
 DRY_RUN=0
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-log() {
-    local msg
-    msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-    echo "$msg" >> "$LOG_FILE" 2>/dev/null || true
-}
-
-die() { echo "error: $*" >&2; exit 1; }
-
-confirm() {
-    # confirm <prompt> -> returns 0 if approved
-    [[ $ASSUME_YES -eq 1 ]] && return 0
-    local reply
-    read -r -p "$1 [y/N] " reply </dev/tty 2>/dev/null || reply=""
-    [[ $reply =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
-run_or_dry() {
-    # run_or_dry <description> <command...>
-    local desc=$1; shift
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo "[dry-run] $desc:"
-        echo "          \$ $*"
-    else
-        echo "[action]  $desc"
-        log "$desc — running: $*"
-        "$@"
-    fi
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+# shellcheck source=optlib.sh
+source "$SCRIPT_DIR/optlib.sh"
 
 mb() { # kilobytes -> megabytes
     echo $(( $1 / 1024 ))
@@ -363,7 +335,8 @@ action_restart_app() {
 
     echo "  launching $app..."
     setsid "$launcher" >/dev/null 2>&1 < /dev/null &
-    disown    log "$app relaunched"
+    disown
+    log "$app relaunched"
     echo '  done.'
     echo
 }
@@ -387,60 +360,33 @@ action_watch() {
     done
 }
 
-action_install_timer() {
-    echo '=== Installing daily-report systemd user timer ==='
-    local src_dir destination
-    src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/systemd"
-    destination=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-    if [[ ! -f $src_dir/memopt-report.timer ]]; then
-        die "systemd units not found next to script (expected $src_dir)"
-    fi
-    if [[ $DRY_RUN -eq 1 ]]; then
-        echo "[dry-run] cp $src_dir/*.service $src_dir/*.timer -> $destination"
-        echo '[dry-run] systemctl --user daemon-reload && systemctl --user enable --now memopt-report.timer'
-        return 0
-    fi
-    mkdir -p "$destination"
-    local abs_script
-    abs_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/memopt.sh"
-    sed "s|__MEMOPT_PATH__|$abs_script|" \
-        "$src_dir"/memopt-report.service > "$destination"/memopt-report.service
-    cp "$src_dir"/memopt-report.timer "$destination/"
-    systemctl --user daemon-reload
-    systemctl --user enable --now memopt-report.timer
-    log 'installed and enabled memopt-report.timer'
-    echo '  installed and enabled. Reports run daily; view with:'
-    echo '    journalctl --user -u memopt-report.service'
-}
+action_install_timer() { install_timer memopt; }
 
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
-usage() {
-    sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'
-    exit 0
-}
+usage() { usage_from_markers; }
 
 main() {
     local mode=auto
-    while (( $# )); do
-        case $1 in
+    parse_common_args "$@"
+    case ${MODE:-} in
+        help) usage_from_markers;;
+        watch) mode=watch;;
+    esac
+    local -a rest=("${REMAINING_ARGS[@]}")
+    while (( ${#rest[@]} )); do
+        case ${rest[0]} in
             --report)      mode="report";;
             --stop-bazel)  mode="stop-bazel";;
             --clean)       mode="clean";;
             --trim-swap)   mode="trim-swap";;
-            --restart)     mode="restart"; shift; RESTART_APP=${1:?--restart needs an app: chrome|feishu|cursor};;
-            --watch)       mode="watch"; [[ ${2:-} =~ ^[0-9]+$ ]] && { WATCH_INTERVAL=$2; shift; };;
+            --restart)     mode="restart"; RESTART_APP=${rest[1]:?--restart needs an app: chrome|feishu|cursor}; rest=("${rest[@]:1}");;
             --install-timer) mode="install-timer";;
-            --top)         shift; TOP_N=${1:?--top needs a number};;
-            --threshold)   shift; WATCH_THRESHOLD=${1:?--threshold needs a percentage};;
-            --yes)         ASSUME_YES=1;;
-            --dry-run)     DRY_RUN=1;;
-            -h|--help)     usage;;
-            *) die "unknown option: $1 (see --help)";;
+            *) die "unknown option: ${rest[0]} (see --help)";;
         esac
-        shift
+        rest=("${rest[@]:1}")
     done
 
     mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
