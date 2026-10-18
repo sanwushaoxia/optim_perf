@@ -30,6 +30,7 @@ readonly WATCH_THRESHOLD_DEFAULT=15
 TOP_N=$TOP_N_DEFAULT
 WATCH_INTERVAL=$WATCH_INTERVAL_DEFAULT
 WATCH_THRESHOLD=$WATCH_THRESHOLD_DEFAULT
+# shellcheck disable=SC2034  # consumed by optlib.sh confirm()
 ASSUME_YES=0
 DRY_RUN=0
 
@@ -137,22 +138,26 @@ print_top() {
 
 print_swap_consumers() {
     echo "=== Top swap consumers (over 50 MB) ==="
-    local lines=0
+    # single awk pass over all /proc/[0-9]*/status — one fork instead of two per
+    # pid. Name always precedes VmSwap in status, so emit on the VmSwap line.
+    # POSIX-compatible (no ENDFILE: system awk is mawk).
     local out
-    out=$(for f in /proc/[0-9]*/status; do
-        [[ -r $f ]] || continue
-        local pid=${f#/proc/}; pid=${pid%/status}
-        local name swap
-        name=$(awk '/^Name:/{print $2}' "$f" 2>/dev/null) || continue
-        swap=$(awk '/^VmSwap:/{print $2}' "$f" 2>/dev/null) || continue
-        [[ -n $swap && $swap -gt 51200 ]] || continue
-        printf '%8d MB  %-20s (pid %s)\n' $(( swap / 1024 )) "$name" "$pid"
-    done | sort -rn)
+    out=$(awk '
+        FNR == 1 {
+            pid = FILENAME
+            sub(/^\/proc\//, "", pid); sub(/\/status$/, "", pid)
+            name = ""
+        }
+        /^Name:/   { name = $2 }
+        /^VmSwap:/ && $2 + 0 > 51200 {
+            printf "%8d MB  %-20s (pid %s)\n", $2 / 1024, name, pid
+        }
+    ' /proc/[0-9]*/status 2>/dev/null | sort -rn)
     if [[ -n $out ]]; then
         printf '%s\n' "$out"
-        lines=1
+    else
+        echo '  (no process is using significant swap)'
     fi
-    (( lines )) || echo '  (no process is using significant swap)'
     echo
 }
 
@@ -178,33 +183,20 @@ EOF
 # actions
 # ---------------------------------------------------------------------------
 
-find_user_pids() { # find_user_pids <exact binary path or pattern...> -> pids on stdout
+find_user_pids() { # find_user_pids <glob pattern...> -> pids on stdout
+    # single ps pass; matches glob patterns against the full command line
     local -a patterns=("$@")
-    local pids="" pid cmd
-    for pid in $(ps -u "$USER" -o pid= 2>/dev/null); do
-        cmd=$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline") || continue
+    local pat pid pids="" cmd
+    while read -r pid cmd; do
         [[ -n $cmd ]] || continue
-        local pat
         for pat in "${patterns[@]}"; do
             # shellcheck disable=SC2254  # pattern is intentionally glob-matched
             case $cmd in
                 $pat) pids+="${pids:+ }$pid"; break ;;
             esac
         done
-    done
+    done < <(ps -u "$USER" -o pid=,args= 2>/dev/null)
     echo "$pids"
-}
-
-is_idle() { # is_idle <pid> -> 0 if CPU delta over 2s is < 5% of one core
-    [[ -r /proc/$1/stat ]] || return 1
-    local j1 j2
-    j1=$(proc_cpu_jiffies "$1")
-    sleep 2
-    j2=$(proc_cpu_jiffies "$1")
-    local hz
-    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
-    # idle = less than 5% of one core over the 2s sample => < 0.1 * hz jiffies
-    (( (j2 - j1) * 10 < hz ))
 }
 
 action_stop_bazel() {
@@ -216,22 +208,42 @@ action_stop_bazel() {
         echo '  No bazel server running — nothing to do.'
         return 0
     fi
-    local pid stopped=0
-    for pid in $pids; do
-        if is_idle "$pid"; then
-            if [[ ${AUTO_TIER:-0} -eq 1 ]]; then
-                # auto mode: killing is a side effect — require consent (declines
-                # automatically in non-interactive/timer environments)
-                confirm "Stop idle bazel server (pid $pid)?" || { echo '  skipped (no consent).'; continue; }
-            fi
-            run_or_dry "stopping idle bazel server (pid $pid)" kill "$pid"
-            stopped=1
+    # sample all pids' t1, one shared sleep, then t2 — total 2s instead of 2s/pid
+    local -a pids_a
+    read -r -a pids_a <<<"$pids"
+    local hz
+    hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    local -a j1 j2
+    local pid
+    for pid in "${pids_a[@]}"; do
+        j1+=("$(proc_cpu_jiffies "$pid")")
+    done
+    sleep 2
+    local i=0 idle_pids="" active_pids=""
+    for pid in "${pids_a[@]}"; do
+        j2+=("$(proc_cpu_jiffies "$pid")")
+        if [[ -r /proc/$pid/stat ]] && (( (j2[i] - j1[i]) * 10 < hz )); then
+            idle_pids+="${idle_pids:+ }$pid"
         else
-            echo "  pid $pid is actively building — leaving it alone."
+            active_pids+="${active_pids:+ }$pid"
         fi
+        (( i += 1 ))
+    done
+    for pid in $active_pids; do
+        echo "  pid $pid is actively building — leaving it alone."
+    done
+    local stopped=0
+    for pid in $idle_pids; do
+        if [[ ${AUTO_TIER:-0} -eq 1 ]]; then
+            # auto mode: killing is a side effect — require consent (declines
+            # automatically in non-interactive/timer environments)
+            confirm "Stop idle bazel server (pid $pid)?" || { echo '  skipped (no consent).'; continue; }
+        fi
+        run_or_dry "stopping idle bazel server (pid $pid)" kill "$pid"
+        stopped=1
     done
     if (( stopped )) && (( ! DRY_RUN )); then
-        log "stopped idle bazel server pids: $pids"
+        log "stopped idle bazel server pids: $idle_pids"
     fi
     echo
 }

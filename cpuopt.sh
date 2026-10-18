@@ -37,6 +37,7 @@ TOP_N=$TOP_N_DEFAULT
 WATCH_INTERVAL=$WATCH_INTERVAL_DEFAULT
 WATCH_THRESHOLD=$WATCH_THRESHOLD_DEFAULT
 SCAN_HOURS=$SCAN_HOURS_DEFAULT
+# shellcheck disable=SC2034  # consumed by optlib.sh confirm()
 ASSUME_YES=0
 DRY_RUN=0
 
@@ -50,15 +51,33 @@ source "$SCRIPT_DIR/optlib.sh"
 # ---------------------------------------------------------------------------
 
 cpu_stats() {
-    # emits: ncores load1 cpu_user_pct cpu_idle_pct (from a 1s vmstat sample)
-    local ncores
+    # emits: ncores load1 cpu_user_pct cpu_idle_pct
+    # /proc/stat delta over CPU_STATS_INTERVAL seconds; watch mode reuses the
+    # previous sample's timestamp so the sleep only covers the watch gap.
+    local ncores interval s1 s2
     ncores=$(nproc)
-    local line
-    line=$(vmstat 1 2 | tail -1)
-    local -a f
-    read -r -a f <<<"$line"
-    # vmstat columns: r b swpd free buff cache si so bi bo in cs us sy id wa st
-    printf '%d %s %s %s\n' "$ncores" "${f[0]}" "${f[12]}" "${f[14]}"
+    interval=${CPU_STATS_INTERVAL:-1}
+    s1=$(head -1 /proc/stat)
+    sleep "$interval"
+    s2=$(head -1 /proc/stat)
+    local pct
+    pct=$(awk -v a="$s1" -v b="$s2" '
+        NR == 1 {
+            split(a, p, " ")
+            u1 = p[2]; n1 = p[3]; sy1 = p[4]; id1 = p[5]; iow1 = p[6]
+        }
+        {
+            split(b, p, " ")
+            u2 = p[2]; n2 = p[3]; sy2 = p[4]; id2 = p[5]; iow2 = p[6]
+        }
+        END {
+            dt = (u2+n2+sy2+id2+iow2) - (u1+n1+sy1+id1+iow1)
+            if (dt <= 0) { print "0 100"; exit }
+            printf "%.1f %.1f", (u2-u1)/dt*100, (id2-id1)/dt*100
+        }')
+    local load1
+    load1=$(awk '{print $1}' /proc/loadavg)
+    printf '%d %s %s\n' "$ncores" "$load1" "$pct"
 }
 
 print_summary() {
@@ -323,6 +342,9 @@ action_stop_bazel_thrash() {
 
 action_watch() {
     echo "Watch mode: reporting every ${WATCH_INTERVAL}s, alerting above ${WATCH_THRESHOLD}% busy. Ctrl-C to stop."
+    # The sample window overlaps the sleep between rounds, so each round costs
+    # ~0 extra time beyond the watch interval itself.
+    CPU_STATS_INTERVAL=$WATCH_INTERVAL
     while true; do
         date '+%H:%M:%S'
         print_summary
@@ -333,7 +355,6 @@ action_watch() {
             ps -eo pcpu=,comm=,args= --sort=-pcpu | head -3 | awk '{printf "  %5s%%  %s\n", $1, $2}'
             log "ALERT: high CPU (${idle_pct}% idle)"
         fi
-        sleep "$WATCH_INTERVAL"
     done
 }
 
