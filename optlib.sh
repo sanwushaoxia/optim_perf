@@ -84,6 +84,19 @@ install_timer() {
     echo "    journalctl --user -u $prefix-report.service"
 }
 
+proc_cpu_jiffies() { # proc_cpu_jiffies <pid> -> prints utime+stime jiffies
+    # /proc/[pid]/stat field 14/15: comm can contain spaces, so strip the
+    # parenthesised comm first before counting fields.
+    awk '{
+        sub(/^[^)]*\) /, "", $0)
+        n = split($0, f, " ")
+        # after comm removal, utime is field 12, stime field 13 (1-based, post-state)
+        print f[12] + f[13]
+    }' "/proc/$1/stat" 2>/dev/null || echo 0
+}
+
+proc_pid_alive() { [[ -d /proc/$1 ]] && [[ $(ps -o comm= -p "$1" 2>/dev/null) != "" ]]; }
+
 parse_common_args() {
     # parse_common_args -- handles: --watch, --top, --threshold, --yes,
     # --dry-run, -h/--help. Sets WATCH_INTERVAL, TOP_N, WATCH_THRESHOLD,

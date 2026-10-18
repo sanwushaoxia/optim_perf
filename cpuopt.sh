@@ -205,21 +205,21 @@ is_interactive_process() { # is_interactive_process <pid> -> 0 = protect it
     local comm
     comm=$(ps -o comm= -p "$1" 2>/dev/null) || return 1
     case $comm in
-        gnome-shell|Xorg|gnome-session*|plasmashell|pulseaudio|pipewire|systemd|bash|zsh)
+        gnome-shell|Xorg|Xwayland|gnome-session*|plasmashell|pulseaudio|pipewire|\
+systemd|systemd*|bash|zsh|ibus*|xdg-desktop-portal*|gsd-*|gnome-shell-calendar-server|\
+nvidia-smi|Xorg.wrap|kwin*|xfce4-*|mutter|unknown)
             return 0;;
         *) return 1;;
     esac
 }
 
-proc_pid_alive() { [[ -d /proc/$1 ]] && [[ $(ps -o comm= -p "$1" 2>/dev/null) != "" ]]; }
-
 proc_busy_ratio() { # proc_busy_ratio <pid> -> prints CPU% sampled over 2s
     local pid=$1
     local hz t1 t2
     hz=$(getconf CLK_TCK 2>/dev/null || echo 100)
-    t1=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
+    t1=$(proc_cpu_jiffies "$pid") || return 1
     sleep 2
-    t2=$(awk '{print $14+$15}' "/proc/$pid/stat" 2>/dev/null) || return 1
+    t2=$(proc_cpu_jiffies "$pid") || return 1
     awk -v a="$t1" -v b="$t2" -v hz="$hz" 'BEGIN{printf "%.1f", (b-a)/hz/2*100}'
 }
 
@@ -358,8 +358,7 @@ main() {
             --report)      mode="report";;
             --scan)        mode="scan"; [[ ${rest[1]:-} =~ ^[0-9]+(\.[0-9]+)?$ ]] && { SCAN_HOURS=${rest[1]}; rest=("${rest[@]:1}"); };;
             --throttle)    mode="throttle"; THROTTLE_PID=${rest[1]:?--throttle needs a PID}; rest=("${rest[@]:1}");;
-            --unthrottle)  mode="unthrottle"; THROTTLE_PID=${rest[1]:?--unthrottle needs a PID}; rest=("${rest[@]:1}");;
-            --kill)        mode="kill"; KILL_PID="${rest[1]:?--kill needs a PID}"; rest=("${rest[@]:1}");;
+            --unthrottle)  mode="unthrottle"; THROTTLE_PID=${rest[1]:?--unthrottle needs a PID}; rest=("${rest[@]:1}");;            --kill)        mode="kill"; KILL_PID="${rest[1]:?--kill needs a PID}"; rest=("${rest[@]:1}");;
             --stop-bazel-thrash) mode="stop-bazel-thrash";;
             --install-timer) mode="install-timer";;
             *) die "unknown option: ${rest[0]} (see --help)";;

@@ -195,10 +195,6 @@ find_user_pids() { # find_user_pids <exact binary path or pattern...> -> pids on
     echo "$pids"
 }
 
-proc_cpu_jiffies() { # total CPU jiffies of a pid
-    awk '{print $14+$15}' "/proc/$1/stat" 2>/dev/null || echo 0
-}
-
 is_idle() { # is_idle <pid> -> 0 if CPU delta over 2s is < 5% of one core
     [[ -r /proc/$1/stat ]] || return 1
     local j1 j2
@@ -223,6 +219,11 @@ action_stop_bazel() {
     local pid stopped=0
     for pid in $pids; do
         if is_idle "$pid"; then
+            if [[ ${AUTO_TIER:-0} -eq 1 ]]; then
+                # auto mode: killing is a side effect — require consent (declines
+                # automatically in non-interactive/timer environments)
+                confirm "Stop idle bazel server (pid $pid)?" || { echo '  skipped (no consent).'; continue; }
+            fi
             run_or_dry "stopping idle bazel server (pid $pid)" kill "$pid"
             stopped=1
         else
@@ -401,6 +402,7 @@ main() {
         watch)        action_watch;;
         install-timer) action_install_timer;;
         auto)
+            AUTO_TIER=1
             print_summary
             print_top "$TOP_N"
             print_swap_consumers
