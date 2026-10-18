@@ -1,0 +1,6 @@
+[Unit]
+Description=Memory usage report (memopt.sh)
+
+[Service]
+Type=oneshot
+ExecStart=__MEMOPT_PATH__ --report

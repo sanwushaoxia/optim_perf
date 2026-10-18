@@ -1,0 +1,9 @@
+[Unit]
+Description=Run cpuopt.sh CPU report daily
+
+[Timer]
+OnCalendar=*-*-* 09:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

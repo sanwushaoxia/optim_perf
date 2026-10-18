@@ -1,0 +1,6 @@
+[Unit]
+Description=CPU usage report (cpuopt.sh)
+
+[Service]
+Type=oneshot
+ExecStart=__CPUOPT_PATH__ --report
