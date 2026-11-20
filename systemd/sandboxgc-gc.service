@@ -1,0 +1,6 @@
+[Unit]
+Description=Reclaim leaked Cursor sandbox processes (sandboxgc.sh)
+
+[Service]
+Type=oneshot
+ExecStart=__SANDBOXGCOPT_PATH__ --gc --yes

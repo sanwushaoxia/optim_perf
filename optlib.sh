@@ -59,29 +59,31 @@ usage_from_markers() {
 }
 
 install_timer() {
-    # install_timer <unit-prefix> — install systemd user timer + service
+    # install_timer <unit-prefix> [unit-suffix] — install systemd user timer + service
+    # Suffix defaults to "report" (daily reports); sandboxgc uses "gc" (hourly).
     local prefix=$1
-    echo '=== Installing daily-report systemd user timer ==='
+    local suffix=${2:-report}
+    echo "=== Installing ${suffix} systemd user timer ==="
     local src_dir destination abs_script
     src_dir="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)/systemd"
     destination=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
-    if [[ ! -f $src_dir/$prefix-report.timer ]]; then
-        die "systemd units not found next to script (expected $src_dir)"
+    if [[ ! -f $src_dir/$prefix-$suffix.timer ]]; then
+        die "systemd units not found next to script (expected $src_dir/$prefix-$suffix.timer)"
     fi
     if [[ $DRY_RUN -eq 1 ]]; then
-        echo "[dry-run] install $src_dir/$prefix-report.{service,timer} -> $destination"
+        echo "[dry-run] install $src_dir/$prefix-$suffix.{service,timer} -> $destination"
         return 0
     fi
     mkdir -p "$destination"
     abs_script="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)/$SCRIPT_NAME"
     sed "s|__${prefix^^}OPT_PATH__|$abs_script|" \
-        "$src_dir"/"$prefix"-report.service > "$destination"/"$prefix"-report.service
-    cp "$src_dir"/"$prefix"-report.timer "$destination/"
+        "$src_dir"/"$prefix"-"$suffix".service > "$destination"/"$prefix"-"$suffix".service
+    cp "$src_dir"/"$prefix"-"$suffix".timer "$destination/"
     systemctl --user daemon-reload
-    systemctl --user enable --now "$prefix-report.timer"
-    log "installed and enabled $prefix-report.timer"
-    echo '  installed and enabled. View reports with:'
-    echo "    journalctl --user -u $prefix-report.service"
+    systemctl --user enable --now "$prefix-$suffix.timer"
+    log "installed and enabled $prefix-$suffix.timer"
+    echo '  installed and enabled. View output with:'
+    echo "    journalctl --user -u $prefix-$suffix.service"
 }
 
 proc_cpu_jiffies() { # proc_cpu_jiffies <pid> -> prints utime+stime jiffies
